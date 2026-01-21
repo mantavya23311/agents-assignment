@@ -1,7 +1,6 @@
 import logging
 
 from dotenv import load_dotenv
-from google.genai.types import Modality  # noqa: F401
 
 from livekit.agents import Agent, AgentServer, AgentSession, JobContext, cli, room_io
 from livekit.agents.llm import function_tool
