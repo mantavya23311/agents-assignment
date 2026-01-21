@@ -12,13 +12,41 @@ logger.setLevel(logging.INFO)
 
 load_dotenv()
 
-# This example is showing a half-cascade realtime LLM usage where we:
-# - use a multimodal/realtime LLM that takes audio input, generating text output
-# - then use a separate TTS to synthesize audio output
-#
-# This approach fully utilizes the realtime LLM's ability to understand directly from audio
-# and yet maintains control of the pipeline, including using custom voices with TTS
+# ---------------------------
+# NEW: interruption logic
+# ---------------------------
 
+agent_is_speaking = False
+
+IGNORE_WORDS = {
+    "yeah", "ok", "okay", "hmm", "uh-huh", "right"
+}
+
+INTERRUPT_WORDS = {
+    "stop", "wait", "no", "cancel"
+}
+
+
+def should_interrupt(text: str, agent_speaking: bool) -> bool:
+    text = text.lower().strip()
+    words = text.split()
+
+    has_interrupt = any(w in INTERRUPT_WORDS for w in words)
+    only_ignore = all(w in IGNORE_WORDS for w in words)
+
+    if agent_speaking:
+        if has_interrupt:
+            return True          # explicit command
+        if only_ignore:
+            return False         # passive acknowledgement
+        return True              # real sentence
+    else:
+        return True              # agent silent → respond normally
+
+
+# ---------------------------
+# Agent definition
+# ---------------------------
 
 class WeatherAgent(Agent):
     def __init__(self) -> None:
@@ -29,17 +57,45 @@ class WeatherAgent(Agent):
             tts=openai.TTS(voice="ash"),
         )
 
+    async def say(self, *args, **kwargs):
+        """
+        Override say() to track speaking state
+        """
+        global agent_is_speaking
+        agent_is_speaking = True
+        try:
+            return await super().say(*args, **kwargs)
+        finally:
+            agent_is_speaking = False
+
+    async def on_user_transcript(self, text: str):
+        """
+        NEW: handle user speech with context-aware interruption logic
+        """
+        global agent_is_speaking
+
+        logger.info(f"User said: {text}")
+
+        if should_interrupt(text, agent_is_speaking):
+            if agent_is_speaking:
+                logger.info("Interrupting agent speech")
+                await self.interrupt()
+
+            await self.handle_user_input(text)
+        else:
+            # Ignore filler words completely
+            logger.info("Ignoring filler input while agent is speaking")
+
     @function_tool
     async def get_weather(self, location: str):
-        """Called when the user asks about the weather.
-
-        Args:
-            location: The location to get the weather for
-        """
-
+        """Called when the user asks about the weather."""
         logger.info(f"getting weather for {location}")
         return f"The weather in {location} is sunny, and the temperature is 20 degrees Celsius."
 
+
+# ---------------------------
+# Server setup
+# ---------------------------
 
 server = AgentServer()
 
@@ -53,9 +109,11 @@ async def entrypoint(ctx: JobContext):
         room=ctx.room,
         room_options=room_io.RoomOptions(
             text_output=True,
-            audio_output=True,  # you can also disable audio output to use text modality only
+            audio_output=True,
         ),
     )
+
+    # Initial greeting
     session.generate_reply(instructions="say hello to the user in English")
 
 
